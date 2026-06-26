@@ -3,7 +3,7 @@ set -euo pipefail
 
 export PYTHONUNBUFFERED=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
 
 python SAGE_SAM_R4/tools/validate_dataset.py \
   --config SAGE_SAM_R4/configs/r4_3class_v100_tuned.yaml
