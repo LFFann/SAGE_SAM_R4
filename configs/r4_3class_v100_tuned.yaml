@@ -41,18 +41,14 @@ train:
   gradient_accumulation: 1
 
 model:
-  deploy_backbone: knowsam_unet
   base_channels: 32
   use_boundary_head: true
-  feature_dim: 256
   complementary_dropout_p: 0.2
 
 teacher:
   fast_ema_decay: 0.99
   slow_ema_decay: 0.999
   slow_refresh_every: 500
-  slow_refresh_min_delta: 0.0005
-  slow_min_dwell: 1000
   use_bn_eval_for_teacher: true
 
 sam:
@@ -70,13 +66,10 @@ sam:
   adapter_dim: 32
   train_mask_decoder: true
   train_prompt_generator: true
-  freeze_image_encoder_base: true
   freeze_prompt_encoder: true
-  peft_warmup_iterations: 2000
   lr_peft: 0.00003
   lr_prompt: 0.0003
   lr_mask_decoder: 0.00003
-  utility_temperature: 0.02
   utility_ema_decay: 0.9
   disable_semantic_kd_after_no_gain: 3
   prompt:
@@ -85,9 +78,7 @@ sam:
     use_point_prompt: true
     use_negative_points: true
     mask_prompt_size: 256
-    max_components_per_class: 3
     min_component_area: 16
-    prompt_from: teacher_student_consensus
     residual_scale: 0.15
   losses:
     sam_sup_weight: 0.5
@@ -97,15 +88,10 @@ sam:
     sam_relation_weight: 0.05
 
 calibration:
-  alpha: 0.05
   min_pixels_per_class: 128
   start_iter: 500
   update_every: 250
   momentum: 0.8
-  classwise: true
-  use_sam_iou: true
-  use_prompt_stability: true
-  use_teacher_sam_agreement: true
 
 pseudo:
   singleton_weight: 1.0
@@ -127,24 +113,16 @@ structure:
   relation_resolution: 16
   relation_temperature: 0.2
   relation_rank_weight: 0.25
-  use_cache: false
 
 augmentation:
   weak:
     random_flip: true
-    random_rotate_degree: 10
-    random_resized_crop: false
   strong:
-    random_flip: true
-    random_rotate_degree: 15
     gamma_range: [0.75, 1.35]
     gain_range: [0.85, 1.15]
     speckle_std_range: [0.0, 0.08]
-    gaussian_blur_prob: 0.2
-    cutmix_prob: 0.35
     patch_mask_prob: 0.25
     patch_mask_ratio: 0.20
-    adaptive_strength: true
 
 eval:
   batch_size: 1
