@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
-from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Subset
+
+try:
+    from torch.amp import GradScaler as _AmpGradScaler
+except ImportError:
+    _AmpGradScaler = None
+
+try:
+    from torch.amp import autocast as _amp_autocast
+except ImportError:
+    _amp_autocast = None
+
+try:
+    from torch.cuda.amp import GradScaler as _CudaGradScaler
+    from torch.cuda.amp import autocast as _cuda_autocast
+except ImportError:
+    _CudaGradScaler = None
+    _cuda_autocast = None
 
 from Model.deploy_unet import DeployUNet
 from r4.calibration import PromptReliabilityCalibrator, SAMUtilityScheduler
@@ -25,6 +42,52 @@ from r4.models.real_sam_wrapper import RealSAMWrapper
 from r4.ssl.adaptive_ultrasound_augmentation import make_weak_strong_views
 from r4.ssl.online_sam_relation import online_sam_student_relation_loss
 from r4.ssl.target_builder import build_set_valued_targets
+
+
+class _NoOpGradScaler:
+    def scale(self, loss):
+        return loss
+
+    def unscale_(self, optimizer):
+        return None
+
+    def step(self, optimizer):
+        optimizer.step()
+
+    def update(self):
+        return None
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state):
+        return None
+
+
+def make_grad_scaler(device_type: str, enabled: bool):
+    enabled = bool(enabled) and str(device_type) == "cuda"
+    if _AmpGradScaler is not None:
+        try:
+            return _AmpGradScaler(str(device_type), enabled=enabled)
+        except TypeError:
+            return _AmpGradScaler(enabled=enabled)
+    if _CudaGradScaler is not None:
+        return _CudaGradScaler(enabled=enabled)
+    return _NoOpGradScaler()
+
+
+def amp_autocast(device_type: str, enabled: bool):
+    enabled = bool(enabled) and str(device_type) == "cuda"
+    if not enabled:
+        return nullcontext()
+    if _amp_autocast is not None:
+        try:
+            return _amp_autocast(device_type=str(device_type), enabled=True)
+        except TypeError:
+            return _amp_autocast(enabled=True)
+    if _cuda_autocast is not None:
+        return _cuda_autocast(enabled=True)
+    return nullcontext()
 
 
 class SAGESAMR4Trainer:
@@ -110,7 +173,7 @@ class SAGESAMR4Trainer:
         self.optimizer = self._build_optimizer()
         self.trainable_parameters = [p for group in self.optimizer.param_groups for p in group["params"] if p.requires_grad]
         self.amp = bool(train_cfg.get("amp", False)) and self.device.type == "cuda"
-        self.scaler = GradScaler("cuda", enabled=self.amp)
+        self.scaler = make_grad_scaler(self.device.type, self.amp)
         self.best_metrics = {"avg_dice": -1.0, "avg_hd95": float("inf")}
         self._log_trainability()
         self._build_data()
@@ -276,7 +339,7 @@ class SAGESAMR4Trainer:
         structure_cfg = self.config.get("structure", {})
         sam_l = {"valid": False}
         sam_u = {"valid": False}
-        with autocast(device_type=self.device.type, enabled=self.amp):
+        with amp_autocast(self.device.type, self.amp):
             out_l = self.student(x_l, return_features=True)
             loss_sup, sup_logs = supervised_loss(out_l["logits"], y_l, self.num_classes, self.ignore_index)
 
