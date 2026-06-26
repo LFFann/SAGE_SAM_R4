@@ -1,0 +1,111 @@
+experiment:
+  name: SAGE_SAM_R4_Smoke
+  output_dir: outputs/SAGE_SAM_R4_Smoke
+  seed: 2026
+  deterministic: true
+
+data:
+  root: outputs/smoke_data/SAGE_SAM_R4
+  dataset_name: smoke
+  num_classes: 3
+  image_size: 64
+  in_channels: 3
+  labeled_subdir: labeled
+  unlabeled_subdir: unlabeled
+  val_subdir: val
+  test_subdir: test
+  image_dir_name: image
+  mask_dir_name: mask
+  calibration_ratio: 0.25
+  calibration_min_images: 1
+  calibration_split_seed: 2026
+  ignore_index: 255
+  synthetic: true
+
+train:
+  device: cpu
+  max_iterations: 2
+  batch_size_labeled: 2
+  batch_size_unlabeled: 2
+  num_workers: 0
+  lr: 0.001
+  weight_decay: 0.0001
+  optimizer: adamw
+  amp: false
+  grad_clip_norm: 5.0
+  log_every: 1
+  val_every: 2
+  save_every: 2
+  warmup_iterations: 1
+  unsup_ramp_iterations: 1
+  gradient_accumulation: 1
+
+model:
+  deploy_backbone: knowsam_unet
+  base_channels: 8
+  use_boundary_head: true
+  feature_dim: 64
+  complementary_dropout_p: 0.2
+
+teacher:
+  fast_ema_decay: 0.9
+  slow_ema_decay: 0.99
+  slow_refresh_every: 2
+  slow_refresh_min_delta: 0.0
+  slow_min_dwell: 1
+  use_bn_eval_for_teacher: true
+
+sam:
+  use_sam: false
+  model_type: vit_b
+  checkpoint: ./checkpoints/sam_vit_b_01ec64.pth
+  device: cpu
+  image_size: 1024
+  cache_dir: ./cache/SAGE_SAM_R4/sam_structure
+  cache_embeddings: false
+  cache_affinity: false
+  topk_edges: 4
+  train_peft: false
+  semantic_kd_max_weight: 0.0
+  structure_kd_weight: 0.0
+  boundary_kd_weight: 0.0
+  utility_ema_decay: 0.9
+  disable_semantic_kd_after_no_gain: 1
+
+conformal:
+  alpha: 0.1
+  min_pixels_per_class: 8
+  classwise: true
+  shrink_to_global: true
+  background_alpha: 0.05
+  update_every: 2
+
+pseudo:
+  singleton_weight: 1.0
+  set_weight: 0.5
+  rank_weight: 0.1
+  negative_weight: 0.1
+  relation_weight: 0.0
+  boundary_weight: 0.0
+  rank_margin: 0.5
+  safe_negative_threshold: 0.05
+  max_candidate_set_size: 2
+  min_teacher_confidence: 0.3
+  min_sam_confidence: 0.5
+
+augmentation:
+  weak:
+    random_flip: true
+  strong:
+    gamma_range: [0.8, 1.2]
+    gain_range: [0.9, 1.1]
+    speckle_std_range: [0.0, 0.05]
+    patch_mask_prob: 0.2
+    patch_mask_ratio: 0.2
+
+eval:
+  batch_size: 1
+  save_prediction: true
+  compute_hd95: false
+  exclude_background_for_avg: true
+
