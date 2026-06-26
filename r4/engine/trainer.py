@@ -275,6 +275,7 @@ class SAGESAMR4Trainer:
         max_iter = int(max_iterations or self.config["train"].get("max_iterations", 1))
         pair_iter = paired_batches(self.labeled_loader, self.unlabeled_loader)
         progress = OneLineProgress(max_iter)
+        last_val_metrics = {}
         self.logger.info("train_start max_iterations=%d output_dir=%s", max_iter, self.output_dir)
         for iteration in range(1, max_iter + 1):
             batch_l, batch_u = next(pair_iter)
@@ -287,6 +288,7 @@ class SAGESAMR4Trainer:
                 set=logs["loss_set"],
                 lr=logs["lr"],
                 sam=logs["sam_valid_ratio"],
+                **last_val_metrics,
             )
             if iteration % int(self.config["train"].get("log_every", 20)) == 0 or iteration == 1 or iteration == max_iter:
                 append_jsonl(self.output_dir / "metrics.jsonl", {"iteration": iteration, "phase": "train", **logs})
@@ -304,14 +306,19 @@ class SAGESAMR4Trainer:
                 )
             if iteration % int(self.config["train"].get("val_every", 250)) == 0 or iteration == max_iter:
                 metrics = self.validate(iteration)
+                last_val_metrics = {
+                    "val_dice": metrics.get("avg_dice"),
+                    "val_iou": metrics.get("avg_iou"),
+                    "val_hd95": metrics.get("avg_hd95"),
+                }
                 progress.update(
                     iteration,
                     loss=logs["loss_total"],
                     sup=logs["loss_sup"],
                     set=logs["loss_set"],
-                    dice=metrics["avg_dice"],
                     lr=logs["lr"],
                     sam=logs["sam_valid_ratio"],
+                    **last_val_metrics,
                 )
         progress.close()
         latest = self.output_dir / "checkpoints" / "latest.pth"

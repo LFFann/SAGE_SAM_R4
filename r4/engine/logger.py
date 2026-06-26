@@ -56,7 +56,7 @@ class OneLineProgress:
         filled = int(self.width * ratio)
         bar = "#" * filled + "-" * (self.width - filled)
         parts = [f"[{bar}]", f"{iteration}/{self.total}", f"{ratio * 100:5.1f}%"]
-        for key in ("loss", "sup", "set", "dice", "lr", "sam"):
+        for key in ("loss", "sup", "set", "val_dice", "val_iou", "val_hd95", "lr", "sam"):
             if key in metrics and metrics[key] is not None:
                 value = metrics[key]
                 if isinstance(value, float):
