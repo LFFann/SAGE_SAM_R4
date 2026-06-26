@@ -174,6 +174,7 @@ class SAGESAMR4Trainer:
         self.trainable_parameters = [p for group in self.optimizer.param_groups for p in group["params"] if p.requires_grad]
         self.amp = bool(train_cfg.get("amp", False)) and self.device.type == "cuda"
         self.scaler = make_grad_scaler(self.device.type, self.amp)
+        self.grad_accum_steps = max(1, int(train_cfg.get("gradient_accumulation", 1)))
         self.best_metrics = {"avg_dice": -1.0, "avg_hd95": float("inf")}
         self._log_trainability()
         self._build_data()
@@ -277,7 +278,8 @@ class SAGESAMR4Trainer:
         self.logger.info("train_start max_iterations=%d output_dir=%s", max_iter, self.output_dir)
         for iteration in range(1, max_iter + 1):
             batch_l, batch_u = next(pair_iter)
-            logs = self.train_one_iter(batch_l, batch_u, iteration=iteration, update=True)
+            step_optimizer = iteration % self.grad_accum_steps == 0 or iteration == max_iter
+            logs = self.train_one_iter(batch_l, batch_u, iteration=iteration, update=True, step_optimizer=step_optimizer)
             progress.update(
                 iteration,
                 loss=logs["loss_total"],
@@ -317,7 +319,7 @@ class SAGESAMR4Trainer:
         self.logger.info("train_end latest=%s deploy=%s", latest, self.output_dir / "checkpoints" / "deploy_student.pth")
         return latest
 
-    def train_one_iter(self, batch_l, batch_u, iteration: int, update: bool = True):
+    def train_one_iter(self, batch_l, batch_u, iteration: int, update: bool = True, step_optimizer: bool = True):
         self.student.train()
         if self.mentor is not None:
             self.mentor.train()
@@ -409,19 +411,21 @@ class SAGESAMR4Trainer:
 
         sam_grad_norm = 0.0
         if update:
-            self.optimizer.zero_grad(set_to_none=True)
-            self.scaler.scale(loss).backward()
-            if self.config["train"].get("grad_clip_norm"):
+            if (iteration - 1) % self.grad_accum_steps == 0:
+                self.optimizer.zero_grad(set_to_none=True)
+            self.scaler.scale(loss / self.grad_accum_steps).backward()
+            if step_optimizer and self.config["train"].get("grad_clip_norm"):
                 self.scaler.unscale_(self.optimizer)
                 sam_grad_norm = self.mentor.sam_grad_norm() if self.mentor is not None else 0.0
                 torch.nn.utils.clip_grad_norm_(self.trainable_parameters, self.config["train"]["grad_clip_norm"])
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.dual_teacher.update_fast(self.student)
-            if iteration % int(self.config["teacher"].get("slow_refresh_every", 500)) == 0:
-                self.dual_teacher.refresh_slow(self.student)
-                append_jsonl(self.output_dir / "diagnostics.jsonl", {"event": "slow_teacher_refresh", "iteration": iteration})
-            self._maybe_update_prompt_calibrator(iteration, out_l, y_l, sam_l)
+            if step_optimizer:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.dual_teacher.update_fast(self.student)
+                if iteration % int(self.config["teacher"].get("slow_refresh_every", 500)) == 0:
+                    self.dual_teacher.refresh_slow(self.student)
+                    append_jsonl(self.output_dir / "diagnostics.jsonl", {"event": "slow_teacher_refresh", "iteration": iteration})
+                self._maybe_update_prompt_calibrator(iteration, out_l, y_l, sam_l)
 
         prompt_quality = 0.0
         if sam_u.get("valid") and sam_u.get("prompt_quality") is not None:
@@ -446,6 +450,8 @@ class SAGESAMR4Trainer:
             "sam_valid_ratio": 1.0 if sam_u.get("valid") else 0.0,
             "prompt_quality": prompt_quality,
             "sam_adapter_grad_norm": sam_grad_norm,
+            "optimizer_step": 1.0 if (update and step_optimizer) else 0.0,
+            "gradient_accumulation": float(self.grad_accum_steps),
             "lr": self.optimizer.param_groups[0]["lr"],
             "gpu_mem_mb": float(torch.cuda.max_memory_allocated() / 1024 / 1024) if self.device.type == "cuda" else 0.0,
             **targets["stats"],
