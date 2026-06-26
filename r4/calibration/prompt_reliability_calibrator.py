@@ -49,14 +49,14 @@ class PromptReliabilityCalibrator:
         prompt_quality: torch.Tensor | None = None,
         gt: torch.Tensor | None = None,
     ):
-        teacher_prob = teacher_prob.detach().cpu()
-        sam_prob = sam_prob.detach().cpu()
+        teacher_prob = teacher_prob.detach().float().cpu()
+        sam_prob = sam_prob.detach().float().cpu()
         if sam_iou is None:
             sam_iou = sam_prob.new_ones(sam_prob.shape[:2])
-        sam_iou = sam_iou.detach().cpu()
+        sam_iou = sam_iou.detach().float().cpu()
         if prompt_quality is None:
             prompt_quality = sam_prob.new_ones(sam_prob.shape[:2])
-        prompt_quality = prompt_quality.detach().cpu()
+        prompt_quality = prompt_quality.detach().float().cpu()
         teacher_arg = teacher_prob.argmax(dim=1)
         sam_arg = sam_prob.argmax(dim=1)
         agreement = (teacher_arg == sam_arg).float()

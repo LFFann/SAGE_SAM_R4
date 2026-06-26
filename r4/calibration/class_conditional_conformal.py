@@ -14,7 +14,7 @@ class ClassConditionalConformalCalibrator:
         self.fitted = False
 
     def fit(self, probs: torch.Tensor, masks: torch.Tensor):
-        probs = probs.detach().cpu()
+        probs = probs.detach().float().cpu()
         masks = masks.detach().cpu()
         true_scores = []
         q = []
@@ -52,4 +52,3 @@ class ClassConditionalConformalCalibrator:
         self.q_per_class = torch.tensor(state["q_per_class"]).float()
         self.global_q = torch.tensor(state.get("global_q", 0.5)).float()
         self.fitted = bool(state.get("fitted", True))
-
