@@ -25,3 +25,6 @@ def test_r4_smoke_train_validate_test_export():
     payload = torch.load(out, map_location="cpu", weights_only=False)
     assert "model" in payload
     assert not any("teacher" in k.lower() or "sam" in k.lower() or "optimizer" in k.lower() for k in payload["model"])
+    run_cmd(["train_r4.py", "--config", "outputs/SAGE_SAM_R4_Smoke/resolved_config.yaml", "--resume", "outputs/SAGE_SAM_R4_Smoke/checkpoints/latest.pth", "--max-iterations", "3"])
+    resumed = torch.load(ckpt, map_location="cpu", weights_only=False)
+    assert resumed["iteration"] == 3

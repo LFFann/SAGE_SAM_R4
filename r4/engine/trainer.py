@@ -29,7 +29,7 @@ from r4.calibration import PromptReliabilityCalibrator, SAMUtilityScheduler
 from r4.data.dataset_2d import SegmentationDataset2D, resolve_dataset_root
 from r4.data.paired_sampler import paired_batches
 from r4.data.split import create_train_calibration_split
-from r4.engine.checkpoint import export_deploy_payload, save_checkpoint
+from r4.engine.checkpoint import export_deploy_payload, safe_load, save_checkpoint
 from r4.engine.evaluator import evaluate
 from r4.engine.logger import OneLineProgress, append_jsonl, setup_logger
 from r4.losses.boundary_losses import boundary_bce_loss
@@ -176,6 +176,7 @@ class SAGESAMR4Trainer:
         self.scaler = make_grad_scaler(self.device.type, self.amp)
         self.grad_accum_steps = max(1, int(train_cfg.get("gradient_accumulation", 1)))
         self.best_metrics = {"avg_dice": -1.0, "avg_hd95": float("inf")}
+        self.start_iteration = 0
         self._log_trainability()
         self._build_data()
 
@@ -271,13 +272,53 @@ class SAGESAMR4Trainer:
         self.logger.info("dry-run ok: %s", result)
         return result
 
+    def load_checkpoint(self, checkpoint_path):
+        checkpoint_path = Path(checkpoint_path)
+        payload = safe_load(checkpoint_path, map_location="cpu")
+        self.student.load_state_dict(payload["student"], strict=True)
+        if payload.get("fast_teacher") is not None:
+            self.dual_teacher.fast.load_state_dict(payload["fast_teacher"], strict=False)
+        if payload.get("slow_teacher") is not None:
+            self.dual_teacher.slow.load_state_dict(payload["slow_teacher"], strict=False)
+        if payload.get("optimizer") is not None:
+            self.optimizer.load_state_dict(payload["optimizer"])
+            self._move_optimizer_state_to_device()
+        if payload.get("scaler") is not None:
+            try:
+                self.scaler.load_state_dict(payload["scaler"])
+            except Exception as exc:
+                self.logger.warning("Skipping scaler state from %s: %s", checkpoint_path, exc)
+        if payload.get("calibrator") is not None:
+            self.calibrator.load_state_dict(payload["calibrator"])
+        if payload.get("sam_utility") is not None:
+            self.sam_utility.load_state_dict(payload["sam_utility"])
+        if self.mentor is not None and payload.get("mentor") is not None:
+            report = self.mentor.load_trainable_state_dict(payload["mentor"])
+            if report.get("missing") or report.get("unexpected"):
+                self.logger.warning("mentor_resume_report=%s", report)
+        if payload.get("best_metrics") is not None:
+            self.best_metrics = payload["best_metrics"]
+        self.start_iteration = int(payload.get("iteration", 0))
+        append_jsonl(self.output_dir / "diagnostics.jsonl", {"event": "checkpoint_resumed", "iteration": self.start_iteration, "path": str(checkpoint_path)})
+        self.logger.info("resumed checkpoint=%s iteration=%d", checkpoint_path, self.start_iteration)
+        return payload
+
+    def _move_optimizer_state_to_device(self):
+        for state in self.optimizer.state.values():
+            for key, value in list(state.items()):
+                if torch.is_tensor(value):
+                    state[key] = value.to(self.device)
+
     def train(self, max_iterations: int | None = None):
         max_iter = int(max_iterations or self.config["train"].get("max_iterations", 1))
         pair_iter = paired_batches(self.labeled_loader, self.unlabeled_loader)
         progress = OneLineProgress(max_iter)
         last_val_metrics = {}
         self.logger.info("train_start max_iterations=%d output_dir=%s", max_iter, self.output_dir)
-        for iteration in range(1, max_iter + 1):
+        if self.start_iteration >= max_iter:
+            self.logger.warning("resume iteration %d already reaches max_iterations=%d", self.start_iteration, max_iter)
+            return self.output_dir / "checkpoints" / "latest.pth"
+        for iteration in range(self.start_iteration + 1, max_iter + 1):
             batch_l, batch_u = next(pair_iter)
             step_optimizer = iteration % self.grad_accum_steps == 0 or iteration == max_iter
             logs = self.train_one_iter(batch_l, batch_u, iteration=iteration, update=True, step_optimizer=step_optimizer)

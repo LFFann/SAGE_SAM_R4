@@ -112,3 +112,32 @@ class PromptableSAMMentor(nn.Module):
             if param.requires_grad:
                 state["sam_trainable"][name] = param.detach().cpu()
         return state
+
+    def load_trainable_state_dict(self, state: dict):
+        if not state:
+            return {"missing": [], "unexpected": []}
+        if "prompt_generator" not in state and "sam_trainable" not in state:
+            report = self.load_state_dict(state, strict=False)
+            return {"missing": list(report.missing_keys), "unexpected": list(report.unexpected_keys)}
+
+        missing, unexpected = [], []
+        if "prompt_generator" in state:
+            report = self.prompt_generator.load_state_dict(state["prompt_generator"], strict=False)
+            missing.extend([f"prompt_generator.{key}" for key in report.missing_keys])
+            unexpected.extend([f"prompt_generator.{key}" for key in report.unexpected_keys])
+
+        sam_state = state.get("sam_trainable", {})
+        if self.wrapper is None:
+            unexpected.extend(sam_state.keys())
+            return {"missing": missing, "unexpected": unexpected}
+
+        named_params = dict(self.wrapper.sam.named_parameters())
+        for name, tensor in sam_state.items():
+            param = named_params.get(name)
+            if param is None:
+                unexpected.append(name)
+                continue
+            with torch.no_grad():
+                param.copy_(tensor.to(device=param.device, dtype=param.dtype))
+        missing.extend([name for name, param in named_params.items() if param.requires_grad and name not in sam_state])
+        return {"missing": missing, "unexpected": unexpected}

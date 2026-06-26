@@ -97,6 +97,8 @@ def main():
     save_json(collect_environment(), out / "environment.json")
     save_json({"source": "standalone SAGE_SAM_R4 generated from KnowSAM-style UNet and R3 engineering conventions"}, out / "source_versions.json")
     trainer = SAGESAMR4Trainer(config)
+    if args.resume:
+        trainer.load_checkpoint(args.resume)
     if args.dry_run:
         result = trainer.dry_run()
         print(json.dumps(result, indent=2))
@@ -106,4 +108,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
