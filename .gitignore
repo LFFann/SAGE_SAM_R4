@@ -17,6 +17,6 @@ venv/
 *.log
 nohup.out
 
-SampleData/
-data/
-
+/SampleData/
+/data/
+!r4/data/

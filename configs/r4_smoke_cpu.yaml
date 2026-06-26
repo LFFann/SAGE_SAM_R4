@@ -71,6 +71,10 @@ sam:
   utility_ema_decay: 0.9
   disable_semantic_kd_after_no_gain: 1
   prompt:
+    use_mask_prompt: true
+    use_box_prompt: true
+    use_point_prompt: true
+    use_negative_points: true
     mask_prompt_size: 256
     min_component_area: 4
   losses:
@@ -106,6 +110,8 @@ structure:
   use_online_relation: false
   online_topk: 4
   relation_resolution: 8
+  relation_temperature: 0.2
+  relation_rank_weight: 0.25
   use_cache: false
 
 augmentation:

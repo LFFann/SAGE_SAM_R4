@@ -53,7 +53,13 @@ class RealSAMWrapper(nn.Module):
         train_mask_decoder: bool = False,
         train_prompt_encoder: bool = False,
         train_last_n_blocks: int = 0,
+        lora_rank: int = 4,
+        lora_alpha: float = 8.0,
         max_trainable_ratio: float = 0.05,
+        use_mask_prompt: bool = True,
+        use_box_prompt: bool = True,
+        use_point_prompt: bool = True,
+        use_negative_points: bool = True,
     ):
         super().__init__()
         self.model_type = model_type
@@ -64,6 +70,10 @@ class RealSAMWrapper(nn.Module):
         self.num_classes = int(num_classes)
         self.train_peft = bool(train_peft)
         self.peft_type = str(peft_type)
+        self.use_mask_prompt = bool(use_mask_prompt)
+        self.use_box_prompt = bool(use_box_prompt)
+        self.use_point_prompt = bool(use_point_prompt)
+        self.use_negative_points = bool(use_negative_points)
         if not self.checkpoint.exists():
             raise FileNotFoundError(f"SAM checkpoint does not exist: {self.checkpoint}")
         self.sam_source = None
@@ -77,6 +87,8 @@ class RealSAMWrapper(nn.Module):
             train_mask_decoder=train_mask_decoder,
             train_prompt_encoder=train_prompt_encoder,
             train_last_n_blocks=train_last_n_blocks,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
             max_trainable_ratio=max_trainable_ratio,
         )
         if self.peft_adapter.report.trainable_sam_params > 0:
@@ -156,14 +168,19 @@ class RealSAMWrapper(nn.Module):
             raise RuntimeError("SAM is not available")
         b, _, h, w = images.shape
         image_embeddings = self.image_embedding(images)
-        mask_prompt = prompts["mask_prompt"].to(self.device).float()
-        prompt_size = getattr(self.sam.prompt_encoder, "mask_input_size", mask_prompt.shape[-2:])
-        if tuple(mask_prompt.shape[-2:]) != tuple(prompt_size):
-            mask_prompt = F.interpolate(mask_prompt, size=prompt_size, mode="bilinear", align_corners=False)
+        mask_prompt = prompts.get("mask_prompt")
+        if self.use_mask_prompt and mask_prompt is not None:
+            mask_prompt = mask_prompt.to(self.device).float()
+            prompt_size = getattr(self.sam.prompt_encoder, "mask_input_size", mask_prompt.shape[-2:])
+            if tuple(mask_prompt.shape[-2:]) != tuple(prompt_size):
+                mask_prompt = F.interpolate(mask_prompt, size=prompt_size, mode="bilinear", align_corners=False)
+        else:
+            mask_prompt = None
         image_index = prompts["image_index"].to(self.device).long()
         class_ids = prompts["class_ids"].to(self.device).long()
         prompt_embeddings = image_embeddings.index_select(0, image_index)
-        sparse_embeddings, dense_embeddings = self.sam.prompt_encoder(points=None, boxes=None, masks=mask_prompt)
+        points, boxes = self._prepare_sparse_prompts(prompts)
+        sparse_embeddings, dense_embeddings = self.sam.prompt_encoder(points=points, boxes=boxes, masks=mask_prompt)
         low_res_masks, iou_predictions = self.sam.mask_decoder(
             image_embeddings=prompt_embeddings,
             image_pe=self.sam.prompt_encoder.get_dense_pe(),
@@ -243,6 +260,58 @@ class RealSAMWrapper(nn.Module):
             "class_ids": class_ids,
             "prompt_quality": teacher_prob.new_ones((b, c)),
         }
+
+    def _prepare_sparse_prompts(self, prompts: dict[str, torch.Tensor]):
+        local_prompt_encoder = str(self.sam_source or "").startswith("SAGE_SAM_R4/Model/sam")
+        point_coords = prompts.get("point_coords")
+        point_labels = prompts.get("point_labels")
+        neg_coords = prompts.get("negative_point_coords")
+        boxes_xyxy = prompts.get("boxes_xyxy")
+
+        points = None
+        if self.use_point_prompt and point_coords is not None and point_labels is not None:
+            point_coords = point_coords.to(self.device).float()
+            point_labels = point_labels.to(self.device).long()
+            if self.use_negative_points and neg_coords is not None:
+                neg_coords = neg_coords.to(self.device).float()
+                neg_labels = torch.zeros(neg_coords.shape[:2], device=self.device, dtype=point_labels.dtype)
+                point_coords = torch.cat([point_coords, neg_coords], dim=1)
+                point_labels = torch.cat([point_labels, neg_labels], dim=1)
+            if local_prompt_encoder:
+                points = (self._embed_local_points(point_coords, point_labels), point_labels)
+            else:
+                pixel_points = point_coords.clone()
+                pixel_points[..., 0] *= float(self.image_size)
+                pixel_points[..., 1] *= float(self.image_size)
+                points = (pixel_points, point_labels)
+
+        boxes = None
+        if self.use_box_prompt and boxes_xyxy is not None:
+            boxes_xyxy = boxes_xyxy.to(self.device).float()
+            if local_prompt_encoder:
+                boxes = self._embed_local_boxes(boxes_xyxy)
+            else:
+                boxes = boxes_xyxy.clone()
+                boxes[:, [0, 2]] *= float(self.image_size)
+                boxes[:, [1, 3]] *= float(self.image_size)
+        return points, boxes
+
+    def _embed_local_points(self, coords: torch.Tensor, labels: torch.Tensor):
+        prompt_encoder = self.sam.prompt_encoder
+        point_embedding = prompt_encoder.pe_layer.forward_with_coords(coords, prompt_encoder.input_image_size)
+        point_embedding = point_embedding.clone()
+        point_embedding[labels == 0] += prompt_encoder.point_embeddings[0].weight
+        point_embedding[labels == 1] += prompt_encoder.point_embeddings[1].weight
+        return point_embedding
+
+    def _embed_local_boxes(self, boxes_xyxy: torch.Tensor):
+        prompt_encoder = self.sam.prompt_encoder
+        coords = boxes_xyxy.reshape(-1, 2, 2)
+        box_embedding = prompt_encoder.pe_layer.forward_with_coords(coords, prompt_encoder.input_image_size)
+        box_embedding = box_embedding.clone()
+        box_embedding[:, 0, :] += prompt_encoder.point_embeddings[2].weight
+        box_embedding[:, 1, :] += prompt_encoder.point_embeddings[3].weight
+        return box_embedding
 
 
 def _boundary_from_prob(prob: torch.Tensor):

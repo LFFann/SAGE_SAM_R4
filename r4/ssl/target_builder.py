@@ -51,9 +51,13 @@ def build_set_valued_targets(teacher_out: dict, sam_out: dict | None, calibrator
         candidate_set = torch.where(empty, top_candidate, candidate_set)
 
     conf, argmax = combined_prob.max(dim=1)
+    teacher_conf, teacher_label = teacher_prob.max(dim=1)
     semantic_gate = gates.get("semantic_gate", conf >= float(config.get("min_teacher_confidence", 0.5))).bool()
     sam_train_gate = gates.get("sam_train_gate", semantic_gate).bool()
     structure_gate = gates.get("structure_gate", semantic_gate).bool()
+    teacher_reliable_mask = teacher_conf >= float(config.get("min_teacher_confidence", 0.5))
+    if sam_valid:
+        teacher_reliable_mask = teacher_reliable_mask & (teacher_label == sam_prob.argmax(dim=1))
     singleton_mask = (
         (candidate_set.sum(dim=1) == 1)
         & (conf >= float(config.get("min_teacher_confidence", 0.5)))
@@ -70,6 +74,7 @@ def build_set_valued_targets(teacher_out: dict, sam_out: dict | None, calibrator
     negative_set = negative_set & ~candidate_set
     negative_mask = negative_set.any(dim=1) | conflict_mask
     soft_target = combined_prob / combined_prob.sum(dim=1, keepdim=True).clamp_min(1e-6)
+    teacher_only_soft_target = teacher_prob / teacher_prob.sum(dim=1, keepdim=True).clamp_min(1e-6)
     stats = {
         "singleton_ratio": float(singleton_mask.float().mean().detach()),
         "ambiguous_ratio": float(ambiguous_mask.float().mean().detach()),
@@ -92,6 +97,8 @@ def build_set_valued_targets(teacher_out: dict, sam_out: dict | None, calibrator
         "semantic_gate": semantic_gate,
         "sam_train_gate": sam_train_gate,
         "structure_gate": structure_gate,
+        "teacher_reliable_mask": teacher_reliable_mask,
         "soft_target": soft_target.detach(),
+        "teacher_only_soft_target": teacher_only_soft_target.detach(),
         "stats": stats,
     }

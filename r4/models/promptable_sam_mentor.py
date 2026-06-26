@@ -85,6 +85,10 @@ class PromptableSAMMentor(nn.Module):
             "trainable_sam_params": report.trainable_sam_params,
             "trainable_sam_ratio": report.trainable_ratio,
             "trainable_sam_modules": report.trainable_module_names,
+            "lora_param_count": report.lora_param_count,
+            "adapter_param_count": report.adapter_param_count,
+            "mask_decoder_trainable": report.mask_decoder_trainable,
+            "prompt_encoder_trainable": report.prompt_encoder_trainable,
             "trainable_prompt_generator_params": int(prompt_params),
         }
 

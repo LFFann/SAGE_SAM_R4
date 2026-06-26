@@ -82,6 +82,7 @@ sam:
   prompt:
     use_mask_prompt: true
     use_box_prompt: true
+    use_point_prompt: true
     use_negative_points: true
     mask_prompt_size: 256
     max_components_per_class: 3
@@ -124,6 +125,8 @@ structure:
   use_online_relation: true
   online_topk: 8
   relation_resolution: 16
+  relation_temperature: 0.2
+  relation_rank_weight: 0.25
   use_cache: false
 
 augmentation:

@@ -75,7 +75,13 @@ class SAGESAMR4Trainer:
                 train_mask_decoder=sam_cfg.get("train_mask_decoder", True),
                 train_prompt_encoder=not sam_cfg.get("freeze_prompt_encoder", True),
                 train_last_n_blocks=sam_cfg.get("train_last_n_blocks", 0),
+                lora_rank=sam_cfg.get("lora_rank", 4),
+                lora_alpha=sam_cfg.get("lora_alpha", 8),
                 max_trainable_ratio=sam_cfg.get("max_trainable_ratio", 0.05),
+                use_mask_prompt=sam_cfg.get("prompt", {}).get("use_mask_prompt", True),
+                use_box_prompt=sam_cfg.get("prompt", {}).get("use_box_prompt", True),
+                use_point_prompt=sam_cfg.get("prompt", {}).get("use_point_prompt", True),
+                use_negative_points=sam_cfg.get("prompt", {}).get("use_negative_points", True),
             )
             if not wrapper.sam_is_real():
                 raise RuntimeError("SAM did not load as a real model")
@@ -125,10 +131,13 @@ class SAGESAMR4Trainer:
             return
         report = self.mentor.trainability_report()
         self.logger.info(
-            "sam_trainability total=%s trainable=%s ratio=%.6f prompt_generator=%s modules=%s",
+            "sam_trainability total=%s trainable=%s ratio=%.6f lora=%s adapter=%s mask_decoder=%s prompt_generator=%s modules=%s",
             report.get("total_sam_params"),
             report.get("trainable_sam_params"),
             report.get("trainable_sam_ratio", 0.0),
+            report.get("lora_param_count"),
+            report.get("adapter_param_count"),
+            report.get("mask_decoder_trainable"),
             report.get("trainable_prompt_generator_params"),
             report.get("trainable_sam_modules"),
         )
@@ -301,16 +310,19 @@ class SAGESAMR4Trainer:
                 )
                 loss_sam_unsup = gated_soft_sam_loss(
                     sam_u["sam_prob"],
-                    targets["soft_target"],
-                    gate=targets["sam_train_gate"],
+                    targets["teacher_only_soft_target"],
+                    gate=targets["sam_train_gate"] & targets["teacher_reliable_mask"],
                 )
                 if structure_cfg.get("use_online_relation", True):
                     loss_relation = online_sam_student_relation_loss(
                         out_s1["bottleneck"],
                         sam_u.get("sam_embedding"),
                         gate=targets["structure_gate"],
+                        boundary=sam_u.get("sam_boundary"),
                         topk=structure_cfg.get("online_topk", self.config.get("sam", {}).get("topk_edges", 8)),
                         resolution=structure_cfg.get("relation_resolution", 16),
+                        temperature=structure_cfg.get("relation_temperature", 0.2),
+                        rank_weight=structure_cfg.get("relation_rank_weight", 0.25),
                     )
                 if out_s1.get("boundary_logits") is not None:
                     boundary_target = sam_u["sam_boundary"].detach() * targets["structure_gate"].unsqueeze(1).float()
