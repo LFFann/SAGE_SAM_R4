@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
 try:
@@ -24,7 +25,6 @@ except ImportError:
     _CudaGradScaler = None
     _cuda_autocast = None
 
-from Model.deploy_unet import DeployUNet
 from r4.calibration import PromptReliabilityCalibrator, SAMUtilityScheduler
 from r4.data.dataset_2d import SegmentationDataset2D, resolve_dataset_root
 from r4.data.paired_sampler import paired_batches
@@ -32,6 +32,7 @@ from r4.data.split import create_train_calibration_split
 from r4.engine.checkpoint import export_deploy_payload, safe_load, save_checkpoint
 from r4.engine.evaluator import evaluate
 from r4.engine.logger import OneLineProgress, append_jsonl, setup_logger
+from r4.engine.model_factory import build_deploy_model
 from r4.losses.boundary_losses import boundary_bce_loss
 from r4.losses.sam_adapter_losses import gated_soft_sam_loss, sam_ce_dice_loss, sam_student_kd_loss
 from r4.losses.set_valued_losses import set_valued_supervision_loss
@@ -40,6 +41,7 @@ from r4.models.dual_temporal_teacher import DualTemporalTeacher
 from r4.models.promptable_sam_mentor import PromptableSAMMentor
 from r4.models.real_sam_wrapper import RealSAMWrapper
 from r4.ssl.adaptive_ultrasound_augmentation import make_weak_strong_views
+from r4.ssl.correlation_propagation import correlation_propagation_loss, propagate_correlation_targets
 from r4.ssl.online_sam_relation import online_sam_student_relation_loss
 from r4.ssl.target_builder import build_set_valued_targets
 
@@ -108,13 +110,8 @@ class SAGESAMR4Trainer:
         model_cfg = config["model"]
         self.num_classes = int(data_cfg["num_classes"])
         self.ignore_index = int(data_cfg.get("ignore_index", 255))
-        self.student = DeployUNet(
-            in_channels=int(data_cfg.get("in_channels", 3)),
-            num_classes=self.num_classes,
-            base_channels=int(model_cfg.get("base_channels", 32)),
-            use_boundary_head=bool(model_cfg.get("use_boundary_head", True)),
-            complementary_dropout_p=float(model_cfg.get("complementary_dropout_p", 0.2)),
-        ).to(self.device)
+        self.student = build_deploy_model(config).to(self.device)
+        self.logger.info("deploy_model=%s backbone=%s", self.student.__class__.__name__, model_cfg.get("deploy_backbone", "dual_fusion"))
         self.dual_teacher = DualTemporalTeacher(
             self.student,
             fast_decay=config["teacher"].get("fast_ema_decay", 0.99),
@@ -164,6 +161,11 @@ class SAGESAMR4Trainer:
             update_every=cal_cfg.get("update_every", 250),
             momentum=cal_cfg.get("momentum", 0.8),
             min_pixels_per_class=cal_cfg.get("min_pixels_per_class", 128),
+            use_soft_gate=cal_cfg.get("use_soft_gate", True),
+            min_participation_ratio=cal_cfg.get("min_participation_ratio", 0.0),
+            max_quantile_clip=cal_cfg.get("max_quantile_clip", 0.97),
+            temperature=cal_cfg.get("temperature", 0.05),
+            coverage_target=cal_cfg.get("coverage_target"),
         )
         self.sam_utility = SAMUtilityScheduler(
             max_weight=sam_cfg.get("losses", {}).get("sam_student_kd_weight", sam_cfg.get("semantic_kd_max_weight", 0.15)),
@@ -275,7 +277,13 @@ class SAGESAMR4Trainer:
     def load_checkpoint(self, checkpoint_path):
         checkpoint_path = Path(checkpoint_path)
         payload = safe_load(checkpoint_path, map_location="cpu")
-        self.student.load_state_dict(payload["student"], strict=True)
+        student_state = payload["student"]
+        if hasattr(self.student, "branch_a") and student_state and not any(str(k).startswith("branch_") for k in student_state):
+            student_state = {f"branch_a.{k}": v for k, v in student_state.items()}
+            self.logger.warning("Loaded legacy single-branch student weights into dual-fusion branch_a only")
+        report = self.student.load_state_dict(student_state, strict=False)
+        if report.missing_keys or report.unexpected_keys:
+            self.logger.warning("student_resume_report missing=%s unexpected=%s", report.missing_keys, report.unexpected_keys)
         if payload.get("fast_teacher") is not None:
             self.dual_teacher.fast.load_state_dict(payload["fast_teacher"], strict=False)
         if payload.get("slow_teacher") is not None:
@@ -391,13 +399,24 @@ class SAGESAMR4Trainer:
         sam_u = {"valid": False}
         with amp_autocast(self.device.type, self.amp):
             out_l = self.student(x_l, return_features=True)
-            loss_sup, sup_logs = supervised_loss(out_l["logits"], y_l, self.num_classes, self.ignore_index)
+            loss_sup_fusion, sup_logs = supervised_loss(out_l["logits"], y_l, self.num_classes, self.ignore_index)
+            loss_sup_a = self._supervised_branch_loss(out_l, "logits_a", y_l)
+            loss_sup_b = self._supervised_branch_loss(out_l, "logits_b", y_l)
+            loss_cfg = self.config.get("losses", {})
+            branch_sup_weight = float(loss_cfg.get("branch_sup_weight", 0.5))
+            fusion_sup_weight = float(loss_cfg.get("fusion_sup_weight", 1.0))
+            if "logits_a" in out_l and "logits_b" in out_l:
+                loss_sup = fusion_sup_weight * loss_sup_fusion + branch_sup_weight * 0.5 * (loss_sup_a + loss_sup_b)
+            else:
+                loss_sup = loss_sup_fusion
 
             loss_sam_sup = x_l.new_tensor(0.0)
             loss_sam_unsup = x_l.new_tensor(0.0)
             loss_kd = x_l.new_tensor(0.0)
             loss_relation = x_l.new_tensor(0.0)
             loss_boundary = x_l.new_tensor(0.0)
+            loss_corr = x_l.new_tensor(0.0)
+            loss_conflict = x_l.new_tensor(0.0)
             if self.use_sam and self.mentor is not None:
                 sam_l = self.mentor.forward_labeled(x_l, y_l)
                 loss_sam_sup = sam_ce_dice_loss(sam_l["sam_prob"], y_l, self.num_classes, self.ignore_index)
@@ -408,6 +427,10 @@ class SAGESAMR4Trainer:
             out_s2 = self.student(x_u_s2, return_features=True, feature_dropout="complementary")
             ssl1 = set_valued_supervision_loss(out_s1["logits"], targets, pseudo_cfg.get("rank_margin", 0.5))
             ssl2 = set_valued_supervision_loss(out_s2["logits"], targets, pseudo_cfg.get("rank_margin", 0.5))
+            branch_ssl = self._branch_ssl_loss(out_s1, out_s2, targets, pseudo_cfg)
+            loss_conflict = 0.5 * (
+                self._dual_consistency_loss(out_s1, targets) + self._dual_consistency_loss(out_s2, targets)
+            )
             ramp = min(1.0, iteration / max(1, int(self.config["train"].get("unsup_ramp_iterations", 1))))
             loss_unsup = (
                 pseudo_cfg.get("singleton_weight", 1.0) * (ssl1["loss_singleton"] + ssl2["loss_singleton"]) * 0.5
@@ -415,19 +438,38 @@ class SAGESAMR4Trainer:
                 + pseudo_cfg.get("rank_weight", 0.1) * (ssl1["loss_rank"] + ssl2["loss_rank"]) * 0.5
                 + pseudo_cfg.get("negative_weight", 0.1) * (ssl1["loss_negative"] + ssl2["loss_negative"]) * 0.5
                 + pseudo_cfg.get("fuzzy_weight", 0.25) * (ssl1["loss_fuzzy"] + ssl2["loss_fuzzy"]) * 0.5
+                + float(loss_cfg.get("branch_ssl_weight", 0.5)) * branch_ssl
             )
+            if float(pseudo_cfg.get("correlation_weight", 0.0)) > 0.0 and out_s1.get("fusion_feature") is not None:
+                sam_shape = None
+                if sam_u.get("valid"):
+                    sam_shape = sam_u.get("sam_boundary")
+                    if sam_shape is None and sam_u.get("sam_prob") is not None:
+                        sam_shape = sam_u["sam_prob"].detach().max(dim=1, keepdim=True).values
+                propagated = propagate_correlation_targets(
+                    out_s1["fusion_feature"],
+                    torch.softmax(out_s1["logits"].detach(), dim=1),
+                    sam_shape=sam_shape,
+                    reliable_mask=targets["singleton_mask"] | targets["semantic_gate"],
+                    resolution=structure_cfg.get("correlation_resolution", structure_cfg.get("relation_resolution", 16)),
+                    topk=structure_cfg.get("correlation_topk", structure_cfg.get("online_topk", 8)),
+                    temperature=structure_cfg.get("correlation_temperature", structure_cfg.get("relation_temperature", 0.2)),
+                    min_weight=structure_cfg.get("correlation_min_weight", 0.15),
+                )
+                loss_corr = correlation_propagation_loss(out_s1["logits"], propagated)
 
             if self.use_sam and sam_u.get("valid"):
+                sam_gate_weight = targets["sam_weight"] * targets["teacher_reliable_mask"].float()
                 loss_kd = sam_student_kd_loss(
                     out_s1["logits"],
                     sam_u["sam_prob"],
-                    gate=targets["semantic_gate"],
+                    gate=sam_gate_weight,
                     temperature=float(self.config.get("sam", {}).get("kd_temperature", 1.0)),
                 )
                 loss_sam_unsup = gated_soft_sam_loss(
                     sam_u["sam_prob"],
                     targets["teacher_only_soft_target"],
-                    gate=targets["sam_train_gate"] & targets["teacher_reliable_mask"],
+                    gate=sam_gate_weight,
                 )
                 if structure_cfg.get("use_online_relation", True):
                     loss_relation = online_sam_student_relation_loss(
@@ -441,19 +483,26 @@ class SAGESAMR4Trainer:
                         rank_weight=structure_cfg.get("relation_rank_weight", 0.25),
                     )
                 if out_s1.get("boundary_logits") is not None:
-                    boundary_target = sam_u["sam_boundary"].detach() * targets["structure_gate"].unsqueeze(1).float()
+                    boundary_target = sam_u["sam_boundary"].detach() * targets["structure_weight"].unsqueeze(1).float()
                     loss_boundary = boundary_bce_loss(out_s1["boundary_logits"], boundary_target)
 
+            sam_scale = self._sam_self_reliance_scale(iteration)
+            sam_sup_scale = 1.0 if self.config.get("sam", {}).get("keep_labeled_sam_sup", True) else sam_scale
             loss = (
                 loss_sup
-                + sam_loss_cfg.get("sam_sup_weight", self.config.get("sam", {}).get("sam_sup_weight", 0.5)) * loss_sam_sup
+                + sam_sup_scale * sam_loss_cfg.get("sam_sup_weight", self.config.get("sam", {}).get("sam_sup_weight", 0.5)) * loss_sam_sup
                 + ramp
                 * (
                     loss_unsup
-                    + sam_loss_cfg.get("sam_unsup_weight", 0.2) * loss_sam_unsup
-                    + sam_loss_cfg.get("sam_student_kd_weight", self.sam_utility.semantic_weight(iteration)) * loss_kd
-                    + sam_loss_cfg.get("sam_relation_weight", pseudo_cfg.get("relation_weight", 0.05)) * loss_relation
-                    + sam_loss_cfg.get("sam_boundary_weight", pseudo_cfg.get("boundary_weight", 0.05)) * loss_boundary
+                    + float(loss_cfg.get("conflict_review_weight", 0.2)) * loss_conflict
+                    + pseudo_cfg.get("correlation_weight", 0.0) * loss_corr
+                    + sam_scale
+                    * (
+                        sam_loss_cfg.get("sam_unsup_weight", 0.2) * loss_sam_unsup
+                        + sam_loss_cfg.get("sam_student_kd_weight", self.sam_utility.semantic_weight(iteration)) * loss_kd
+                        + sam_loss_cfg.get("sam_relation_weight", pseudo_cfg.get("relation_weight", 0.05)) * loss_relation
+                        + sam_loss_cfg.get("sam_boundary_weight", pseudo_cfg.get("boundary_weight", 0.05)) * loss_boundary
+                    )
                 )
             )
 
@@ -481,11 +530,17 @@ class SAGESAMR4Trainer:
         logs = {
             "loss_total": float(loss.detach()),
             "loss_sup": float(loss_sup.detach()),
+            "loss_sup_fusion": float(loss_sup_fusion.detach()),
+            "loss_sup_a": float(loss_sup_a.detach()),
+            "loss_sup_b": float(loss_sup_b.detach()),
             "loss_singleton": float(ssl1["loss_singleton"].detach()),
             "loss_set": float(ssl1["loss_set"].detach()),
             "loss_rank": float(ssl1["loss_rank"].detach()),
             "loss_negative": float(ssl1["loss_negative"].detach()),
             "loss_fuzzy": float(ssl1["loss_fuzzy"].detach()),
+            "loss_branch_ssl": float(branch_ssl.detach()),
+            "loss_conflict_review": float(loss_conflict.detach()),
+            "loss_correlation": float(loss_corr.detach()),
             "loss_relation": float(loss_relation.detach()),
             "loss_boundary": float(loss_boundary.detach()),
             "loss_sam_sup": float(loss_sam_sup.detach()),
@@ -493,6 +548,7 @@ class SAGESAMR4Trainer:
             "loss_sam_kd": float(loss_kd.detach()),
             "loss_sam_sem": float(loss_kd.detach()),
             "unsup_weight": ramp,
+            "sam_self_reliance_scale": sam_scale,
             "sam_semantic_weight": self.sam_utility.semantic_weight(iteration),
             "fast_slow_agreement": float(teacher_out["agreement"].detach()),
             "sam_valid_ratio": 1.0 if sam_u.get("valid") else 0.0,
@@ -506,6 +562,55 @@ class SAGESAMR4Trainer:
             **sup_logs,
         }
         return logs
+
+    def _supervised_branch_loss(self, out: dict, key: str, target: torch.Tensor):
+        if key not in out:
+            return out["logits"].new_tensor(0.0)
+        loss, _ = supervised_loss(out[key], target, self.num_classes, self.ignore_index)
+        return loss
+
+    def _branch_ssl_loss(self, out_s1: dict, out_s2: dict, targets: dict, pseudo_cfg: dict):
+        losses = []
+        for out in (out_s1, out_s2):
+            for key in ("logits_a", "logits_b"):
+                if key not in out:
+                    continue
+                ssl = set_valued_supervision_loss(out[key], targets, pseudo_cfg.get("rank_margin", 0.5))
+                losses.append(
+                    pseudo_cfg.get("singleton_weight", 1.0) * ssl["loss_singleton"]
+                    + pseudo_cfg.get("set_weight", 0.5) * ssl["loss_set"]
+                    + pseudo_cfg.get("rank_weight", 0.1) * ssl["loss_rank"]
+                    + pseudo_cfg.get("negative_weight", 0.1) * ssl["loss_negative"]
+                    + pseudo_cfg.get("fuzzy_weight", 0.25) * ssl["loss_fuzzy"]
+                )
+        if not losses:
+            return out_s1["logits"].new_tensor(0.0)
+        return torch.stack(losses).mean()
+
+    def _dual_consistency_loss(self, out: dict, targets: dict):
+        if "logits_a" not in out or "logits_b" not in out:
+            return out["logits"].new_tensor(0.0)
+        target_prob = torch.softmax(out["logits"].detach(), dim=1)
+        mask = (targets["singleton_mask"] | targets["ambiguous_mask"] | targets["conflict_mask"]).to(out["logits"].device)
+        if mask.sum() == 0:
+            return out["logits"].new_tensor(0.0)
+        weight = targets.get("candidate_weight", mask.float()).to(out["logits"].device).float() * mask.float()
+        denom = weight.sum().clamp_min(1e-6)
+
+        def _ce(logits):
+            per_pixel = -(target_prob * F.log_softmax(logits, dim=1)).sum(dim=1)
+            return (per_pixel * weight).sum() / denom
+
+        return 0.5 * (_ce(out["logits_a"]) + _ce(out["logits_b"]))
+
+    def _sam_self_reliance_scale(self, iteration: int):
+        sam_cfg = self.config.get("sam", {})
+        start = int(sam_cfg.get("self_reliance_start", self.config["train"].get("max_iterations", 10**9) + 1))
+        if iteration <= start:
+            return 1.0
+        decay = float(sam_cfg.get("self_reliance_decay", 1.0))
+        floor = float(sam_cfg.get("self_reliance_min_weight", 0.05))
+        return max(floor, decay ** max(0, iteration - start))
 
     @torch.no_grad()
     def _maybe_update_prompt_calibrator(self, iteration: int, out_l: dict, y_l: torch.Tensor, sam_l: dict):

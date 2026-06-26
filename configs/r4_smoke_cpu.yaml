@@ -41,8 +41,12 @@ train:
   gradient_accumulation: 1
 
 model:
-  deploy_backbone: knowsam_unet
+  deploy_backbone: dual_fusion
+  branch_a: unet
+  branch_b: morph_unet2d
+  fusion: ham_lite
   base_channels: 8
+  fusion_hidden_channels: 8
   use_boundary_head: true
   feature_dim: 64
   complementary_dropout_p: 0.2
@@ -68,6 +72,10 @@ sam:
   train_mask_decoder: false
   train_prompt_generator: false
   freeze_prompt_encoder: true
+  self_reliance_start: 2
+  self_reliance_decay: 0.999
+  self_reliance_min_weight: 0.05
+  keep_labeled_sam_sup: true
   utility_ema_decay: 0.9
   disable_semantic_kd_after_no_gain: 1
   prompt:
@@ -85,12 +93,18 @@ sam:
     sam_relation_weight: 0.0
 
 calibration:
-  alpha: 0.1
+  alpha: 0.05
   min_pixels_per_class: 8
   start_iter: 2
   update_every: 2
   momentum: 0.8
   classwise: true
+  use_soft_gate: true
+  min_participation_ratio: 0.10
+  max_quantile_clip: 0.97
+  temperature: 0.05
+  coverage_target: 0.20
+  update_only_after_warmup: true
 
 pseudo:
   singleton_weight: 1.0
@@ -98,6 +112,7 @@ pseudo:
   fuzzy_weight: 0.25
   rank_weight: 0.1
   negative_weight: 0.1
+  correlation_weight: 0.05
   relation_weight: 0.0
   boundary_weight: 0.0
   rank_margin: 0.5
@@ -106,12 +121,22 @@ pseudo:
   min_teacher_confidence: 0.3
   min_sam_confidence: 0.5
 
+losses:
+  branch_sup_weight: 0.5
+  branch_ssl_weight: 0.5
+  conflict_review_weight: 0.1
+  fusion_sup_weight: 1.0
+
 structure:
   use_online_relation: true
   online_topk: 4
   relation_resolution: 8
   relation_temperature: 0.2
   relation_rank_weight: 0.25
+  correlation_topk: 4
+  correlation_resolution: 8
+  correlation_temperature: 0.2
+  correlation_min_weight: 0.10
   use_cache: false
 
 augmentation:

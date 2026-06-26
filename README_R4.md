@@ -1,33 +1,39 @@
-# SAGE-SAM R4-SingleLoop
+# SAGE-SAM R4-Final
 
-SAGE-SAM R4-SingleLoop is a single-run semi-supervised segmentation pipeline:
+SAGE-SAM R4-Final is a single-run calibrated SAM-guided dual co-training segmentation pipeline:
 
 ```text
-DeployUNet student
+DeployDualFusionSegmentor student
+  Branch A: UNet-like local texture path
+  Branch B: residual/dilated morphology path
+  Fusion: HAM-lite disagreement-aware fusion logits
 + online promptable SAM mentor
 + trainable SAM LoRA + BottleneckAdapter PEFT parameters
 + trainable prompt generator
 + trainable SAM mask decoder
 + EMA weak-to-strong student learning
-+ prompt reliability calibration
-+ set-valued ambiguous-pixel supervision
-+ online SAM-student boundary/relation consistency
++ calibrated soft SAM participation with minimum coverage protection
++ singleton, set-valued, fuzzy-positive, safe-negative, and correlation-propagated supervision
++ online SAM-student boundary/relation consistency without disk cache
++ late self-reliance decay for SAM unsupervised/KD losses
 ```
 
-The final deploy path is still only `DeployUNet`. SAM, the prompt generator, EMA teachers, calibration state, and relation losses are training-time components only. Validation, testing, and deploy export do not instantiate SAM.
+The final deploy path is `DeployDualFusionSegmentor`, and validation/testing evaluate fusion logits by default. SAM, the prompt generator, EMA teachers, calibration state, and relation/correlation losses are training-time components only. Validation, testing, and deploy export do not instantiate SAM.
 
 ## Directory
 
 - `train_r4.py`, `validate_r4.py`, `test_r4.py`, `export_deploy_checkpoint.py`: main entry points.
-- `Model/deploy_unet.py`: KnowSAM-style five-level UNet deploy student.
+- `Model/deploy_dual_fusion.py`: dual-view deploy student with UNet branch, morphology branch, and HAM-lite fusion.
+- `Model/deploy_unet.py`: UNet branch used inside the dual-fusion deploy student.
 - `r4/models/real_sam_wrapper.py`: real SAM checkpoint guard plus prompted SAM forward.
 - `r4/models/prompt_generator.py`: trainable one-vs-rest mask-prompt generator.
 - `r4/models/promptable_sam_mentor.py`: online SAM co-learner used during training.
 - `r4/models/sam_peft.py`: SAM freezing plus real LoRA and BottleneckAdapter injection for selected image-encoder blocks.
-- `r4/calibration/prompt_reliability_calibrator.py`: online prompt-aware reliability thresholds.
+- `r4/calibration/prompt_reliability_calibrator.py`: online prompt-aware thresholds plus soft participation weights.
 - `r4/data/`: dataset, paired semi-supervised iterator, split, and augmentation transforms.
 - `r4/ssl/target_builder.py`: SAM-teacher singleton, ambiguous, conflict, and safe-negative targets.
 - `r4/ssl/online_sam_relation.py`: batch-local top-k KL/rank SAM-student relation loss without cache.
+- `r4/ssl/correlation_propagation.py`: low-resolution online correlation propagation for low-confidence pixels.
 - `r4/losses/set_valued_losses.py`: singleton, set, fuzzy positive, rank, and safe-negative losses.
 - `tests/`: CPU smoke and core unit tests.
 
@@ -91,7 +97,7 @@ Test:
 python SAGE_SAM_R4/test_r4.py --config outputs/SAGE_SAM_R4_3Class/resolved_config.yaml --checkpoint outputs/SAGE_SAM_R4_3Class/checkpoints/best_val_dice.pth --save-pred
 ```
 
-Export deploy student:
+Export dual-fusion deploy student:
 
 ```bash
 python SAGE_SAM_R4/export_deploy_checkpoint.py --checkpoint outputs/SAGE_SAM_R4_3Class/checkpoints/best_val_dice.pth --output outputs/SAGE_SAM_R4_3Class/checkpoints/deploy_student.pth
@@ -102,13 +108,13 @@ python SAGE_SAM_R4/export_deploy_checkpoint.py --checkpoint outputs/SAGE_SAM_R4_
 R4 does not use multi-round training, offline pseudo-label generation, or structure cache in the main method. Each iteration performs:
 
 ```text
-1. supervised student loss on labeled data
+1. supervised fusion + branch losses on labeled data
 2. supervised SAM adapter/decoder/prompt-generator loss on labeled data
 3. EMA teacher prediction on weak unlabeled images
 4. online prompted SAM forward with mask, box, positive point, and negative point prompts
-5. SAM-teacher set-valued target construction
-6. spatially aligned strong student prediction with complementary dropout
-7. set-valued, KD, teacher-only gated SAM unsupervised, boundary, and online relation losses
+5. SAM-teacher set-valued target construction with calibrated soft weights
+6. spatially aligned strong dual-fusion student prediction with complementary dropout
+7. set-valued, fuzzy-positive, safe-negative, conflict-review, correlation, KD, soft-gated SAM unsupervised, boundary, and online relation losses
 8. one optimizer step for student + SAM PEFT + prompt generator + mask decoder
 9. EMA teacher update and periodic prompt reliability calibration
 ```
@@ -125,6 +131,7 @@ For CPU smoke, `sam.use_sam=false`; this covers train/val/test/export without ne
 - The prompt encoder receives mask prompts plus configured box, positive point, and negative point prompts.
 - `sam_prob` is assembled from SAM foreground masks and a background channel, not from `teacher_prob.clone()`.
 - Training logs include `loss_sam_sup`, `loss_sam_unsup`, `loss_sam_kd`, `prompt_quality`, `sam_teacher_agreement`, and `sam_adapter_grad_norm`.
+- Training logs include `sam_soft_weight_mean`, `sam_participation_ratio`, `per_class_sam_participation_ratio`, `loss_conflict_review`, and `loss_correlation`.
 - Diagnostics include `total_sam_params`, `trainable_sam_params`, `trainable_sam_ratio`, `lora_param_count`, `adapter_param_count`, `mask_decoder_trainable`, `prompt_generator_trainable`, and trainable module names.
 - `loss_sam_unsup` uses teacher-only reliable targets, while student SSL may use the fused SAM-teacher target.
 - Changing the prompt changes the SAM mask decoder input and therefore the SAM output.
@@ -137,15 +144,15 @@ For CPU smoke, `sam.use_sam=false`; this covers train/val/test/export without ne
 
 ```python
 {
-  "model": student_state_dict,
+  "model": dual_fusion_student_state_dict,
   "num_classes": ...,
   "in_channels": ...,
-  "model_name": "SAGE_SAM_R4_DeployStudent",
+  "model_name": "SAGE_SAM_R4_DualFusionDeploy",
   "config_minimal": ...
 }
 ```
 
-The exporter rejects model keys containing `sam`, `teacher`, `mentor`, `calibrator`, `optimizer`, `vnet`, or `relation`.
+The exporter rejects model keys containing `sam`, `teacher`, `mentor`, `calibrator`, or `optimizer`.
 
 ## Common Errors
 

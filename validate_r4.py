@@ -11,11 +11,11 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from Model.deploy_unet import DeployUNet
 from r4.data.dataset_2d import SegmentationDataset2D, resolve_dataset_root
 from r4.engine.checkpoint import load_student_checkpoint
 from r4.engine.evaluator import evaluate
 from r4.engine.logger import append_jsonl
+from r4.engine.model_factory import build_deploy_model
 from r4.utils.io import load_yaml
 
 
@@ -31,7 +31,7 @@ def main():
     if dev == "cuda" and not torch.cuda.is_available():
         dev = "cpu"
     device = torch.device(dev)
-    model = DeployUNet(cfg["data"].get("in_channels", 3), cfg["data"]["num_classes"], cfg["model"].get("base_channels", 32), cfg["model"].get("use_boundary_head", True)).to(device)
+    model = build_deploy_model(cfg).to(device)
     load_student_checkpoint(model, args.checkpoint, strict=False, map_location=device)
     data_root = resolve_dataset_root(
         cfg["data"].get("resolved_root", cfg["data"]["root"]),

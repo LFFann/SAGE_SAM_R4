@@ -42,6 +42,8 @@ def save_checkpoint(path, *, iteration, student, fast_teacher, slow_teacher, opt
 def load_student_checkpoint(model, checkpoint_path, strict=False, map_location="cpu"):
     payload = safe_load(checkpoint_path, map_location=map_location)
     state = payload.get("student") or payload.get("model") or payload
+    if hasattr(model, "branch_a") and state and not any(str(k).startswith("branch_") for k in state):
+        state = {f"branch_a.{k}": v for k, v in state.items()}
     report = model.load_state_dict(state, strict=strict)
     return payload, report
 
@@ -52,8 +54,8 @@ def export_deploy_payload(checkpoint_path, output_path, strip_boundary: bool = F
         raise KeyError("Checkpoint does not contain a student state_dict")
     state = payload["student"]
     if strip_boundary:
-        state = {k: v for k, v in state.items() if not k.startswith("boundary_head")}
-    forbidden = ("sam", "teacher", "mentor", "calibrator", "optimizer", "vnet", "relation")
+        state = {k: v for k, v in state.items() if "boundary_head" not in k}
+    forbidden = ("sam", "teacher", "mentor", "calibrator", "optimizer")
     for key in state:
         lowered = key.lower()
         if any(token in lowered for token in forbidden):
@@ -65,10 +67,13 @@ def export_deploy_payload(checkpoint_path, output_path, strip_boundary: bool = F
         "model": state,
         "num_classes": data.get("num_classes", 3),
         "in_channels": data.get("in_channels", 3),
-        "model_name": "SAGE_SAM_R4_DeployStudent",
+        "model_name": "SAGE_SAM_R4_DualFusionDeploy",
         "config_minimal": {
+            "deploy_backbone": model_cfg.get("deploy_backbone", "dual_fusion"),
             "base_channels": model_cfg.get("base_channels", 32),
+            "fusion_hidden_channels": model_cfg.get("fusion_hidden_channels", model_cfg.get("base_channels", 32)),
             "use_boundary_head": (not strip_boundary) and model_cfg.get("use_boundary_head", True),
+            "complementary_dropout_p": model_cfg.get("complementary_dropout_p", 0.2),
             "image_size": data.get("image_size", 256),
         },
     }

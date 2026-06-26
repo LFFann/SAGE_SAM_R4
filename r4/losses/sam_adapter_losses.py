@@ -4,6 +4,15 @@ import torch
 import torch.nn.functional as F
 
 
+def _gate_to_weight(gate, shape, device, dtype):
+    if gate is None:
+        return torch.ones(shape, device=device, dtype=dtype)
+    weight = gate.to(device)
+    if weight.dtype == torch.bool:
+        weight = weight.float()
+    return weight.to(dtype=dtype).clamp_min(0.0)
+
+
 def sam_ce_dice_loss(sam_prob: torch.Tensor, target: torch.Tensor, num_classes: int, ignore_index: int = 255):
     valid = target != ignore_index
     if valid.sum() == 0:
@@ -25,23 +34,19 @@ def sam_ce_dice_loss(sam_prob: torch.Tensor, target: torch.Tensor, num_classes: 
 
 def gated_soft_sam_loss(sam_prob: torch.Tensor, soft_target: torch.Tensor, gate: torch.Tensor | None = None):
     soft_target = soft_target.detach()
-    if gate is None:
-        gate = torch.ones(sam_prob.shape[0], sam_prob.shape[2], sam_prob.shape[3], device=sam_prob.device, dtype=torch.bool)
-    gate = gate.bool()
-    if gate.sum() == 0:
+    weight = _gate_to_weight(gate, (sam_prob.shape[0], sam_prob.shape[2], sam_prob.shape[3]), sam_prob.device, sam_prob.dtype)
+    if weight.sum() <= 0:
         return sam_prob.new_tensor(0.0)
     log_prob = torch.log(sam_prob.clamp_min(1e-6))
     ce = -(soft_target * log_prob).sum(dim=1)
-    return ce[gate].mean()
+    return (ce * weight).sum() / weight.sum().clamp_min(1e-6)
 
 
 def sam_student_kd_loss(student_logits: torch.Tensor, sam_prob: torch.Tensor, gate: torch.Tensor | None = None, temperature: float = 1.0):
     target = sam_prob.detach()
-    if gate is None:
-        gate = torch.ones(student_logits.shape[0], student_logits.shape[2], student_logits.shape[3], device=student_logits.device, dtype=torch.bool)
-    gate = gate.bool()
-    if gate.sum() == 0:
+    weight = _gate_to_weight(gate, (student_logits.shape[0], student_logits.shape[2], student_logits.shape[3]), student_logits.device, student_logits.dtype)
+    if weight.sum() <= 0:
         return student_logits.new_tensor(0.0)
     log_student = F.log_softmax(student_logits / temperature, dim=1)
     kd = F.kl_div(log_student, target, reduction="none").sum(dim=1) * (temperature**2)
-    return kd[gate].mean()
+    return (kd * weight).sum() / weight.sum().clamp_min(1e-6)
