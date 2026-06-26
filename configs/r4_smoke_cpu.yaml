@@ -61,28 +61,37 @@ sam:
   checkpoint: ./checkpoints/sam_vit_b_01ec64.pth
   device: cpu
   image_size: 1024
-  cache_dir: ./cache/SAGE_SAM_R4/sam_structure
-  cache_embeddings: false
-  cache_affinity: false
-  topk_edges: 4
   train_peft: false
-  semantic_kd_max_weight: 0.0
-  structure_kd_weight: 0.0
-  boundary_kd_weight: 0.0
+  peft_type: lora_adapter
+  train_last_n_blocks: 0
+  max_trainable_ratio: 0.05
+  train_mask_decoder: false
+  train_prompt_generator: false
+  freeze_prompt_encoder: true
   utility_ema_decay: 0.9
   disable_semantic_kd_after_no_gain: 1
+  prompt:
+    mask_prompt_size: 256
+    min_component_area: 4
+  losses:
+    sam_sup_weight: 0.0
+    sam_unsup_weight: 0.0
+    sam_student_kd_weight: 0.0
+    sam_boundary_weight: 0.0
+    sam_relation_weight: 0.0
 
-conformal:
+calibration:
   alpha: 0.1
   min_pixels_per_class: 8
-  classwise: true
-  shrink_to_global: true
-  background_alpha: 0.05
+  start_iter: 2
   update_every: 2
+  momentum: 0.8
+  classwise: true
 
 pseudo:
   singleton_weight: 1.0
   set_weight: 0.5
+  fuzzy_weight: 0.25
   rank_weight: 0.1
   negative_weight: 0.1
   relation_weight: 0.0
@@ -92,6 +101,12 @@ pseudo:
   max_candidate_set_size: 2
   min_teacher_confidence: 0.3
   min_sam_confidence: 0.5
+
+structure:
+  use_online_relation: false
+  online_topk: 4
+  relation_resolution: 8
+  use_cache: false
 
 augmentation:
   weak:
@@ -108,4 +123,3 @@ eval:
   save_prediction: true
   compute_hd95: false
   exclude_background_for_avg: true
-

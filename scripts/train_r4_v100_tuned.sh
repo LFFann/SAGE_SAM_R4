@@ -10,12 +10,7 @@ python SAGE_SAM_R4/tools/validate_dataset.py \
 python SAGE_SAM_R4/tools/verify_real_sam.py \
   --config SAGE_SAM_R4/configs/r4_3class_v100_tuned.yaml
 
-python SAGE_SAM_R4/tools/build_sam_structure_cache.py \
-  --config SAGE_SAM_R4/configs/r4_3class_v100_tuned.yaml \
-  --split unlabeled
-
 mkdir -p outputs/SAGE_SAM_R4_3Class_V100_Tuned
 python SAGE_SAM_R4/train_r4.py \
   --config SAGE_SAM_R4/configs/r4_3class_v100_tuned.yaml \
   2>&1 | tee outputs/SAGE_SAM_R4_3Class_V100_Tuned/stdout.log
-

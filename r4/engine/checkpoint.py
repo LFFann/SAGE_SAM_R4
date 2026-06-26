@@ -13,7 +13,10 @@ def safe_load(path: str | Path, map_location="cpu") -> dict[str, Any]:
         return torch.load(path, map_location=map_location)
 
 
-def save_checkpoint(path, *, iteration, student, fast_teacher, slow_teacher, optimizer, scaler, calibrator, sam_utility, config, best_metrics):
+def save_checkpoint(path, *, iteration, student, fast_teacher, slow_teacher, optimizer, scaler, calibrator, sam_utility, config, best_metrics, mentor=None):
+    mentor_state = None
+    if mentor is not None:
+        mentor_state = mentor.trainable_state_dict() if hasattr(mentor, "trainable_state_dict") else mentor.state_dict()
     payload = {
         "method": "SAGE-SAM-R4",
         "iteration": int(iteration),
@@ -24,6 +27,7 @@ def save_checkpoint(path, *, iteration, student, fast_teacher, slow_teacher, opt
         "scaler": scaler.state_dict() if scaler is not None else None,
         "calibrator": calibrator.state_dict() if calibrator is not None else None,
         "sam_utility": sam_utility.state_dict() if sam_utility is not None else None,
+        "mentor": mentor_state,
         "config": config,
         "best_metrics": best_metrics,
     }
@@ -72,4 +76,3 @@ def export_deploy_payload(checkpoint_path, output_path, strip_boundary: bool = F
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(deploy, output_path)
     return output_path
-

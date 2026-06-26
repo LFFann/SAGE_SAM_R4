@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -23,6 +23,7 @@ def main():
     p.add_argument("--config", required=True)
     p.add_argument("--split", default="unlabeled")
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--output-dir", default=None)
     args = p.parse_args()
     cfg = load_yaml(args.config)
     sam_cfg = cfg["sam"]
@@ -44,7 +45,7 @@ def main():
     )
     ds = SegmentationDataset2D(data_root, split, cfg["data"]["num_classes"], cfg["data"]["image_size"], cfg["data"].get("image_dir_name", "image"), cfg["data"].get("mask_dir_name", "mask"), has_mask=has_mask, ignore_index=cfg["data"].get("ignore_index", 255))
     loader = DataLoader(ds, batch_size=1, shuffle=False)
-    out_dir = Path(sam_cfg["cache_dir"]) / args.split
+    out_dir = Path(args.output_dir or sam_cfg.get("cache_dir", "./cache/SAGE_SAM_R4/experimental_structure_cache")) / args.split
     out_dir.mkdir(parents=True, exist_ok=True)
     for batch in loader:
         sample_id = batch["id"][0].replace("/", "_").replace("\\", "_")
