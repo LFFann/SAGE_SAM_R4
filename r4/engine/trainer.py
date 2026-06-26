@@ -77,6 +77,8 @@ class SAGESAMR4Trainer:
                 train_last_n_blocks=sam_cfg.get("train_last_n_blocks", 0),
                 lora_rank=sam_cfg.get("lora_rank", 4),
                 lora_alpha=sam_cfg.get("lora_alpha", 8),
+                adapter_dim=sam_cfg.get("adapter_dim", 32),
+                adapter_scale=sam_cfg.get("adapter_scale", 1.0),
                 max_trainable_ratio=sam_cfg.get("max_trainable_ratio", 0.05),
                 use_mask_prompt=sam_cfg.get("prompt", {}).get("use_mask_prompt", True),
                 use_box_prompt=sam_cfg.get("prompt", {}).get("use_box_prompt", True),
@@ -131,13 +133,14 @@ class SAGESAMR4Trainer:
             return
         report = self.mentor.trainability_report()
         self.logger.info(
-            "sam_trainability total=%s trainable=%s ratio=%.6f lora=%s adapter=%s mask_decoder=%s prompt_generator=%s modules=%s",
+            "sam_trainability total=%s trainable=%s ratio=%.6f lora=%s adapter=%s mask_decoder=%s prompt_generator_trainable=%s prompt_generator_params=%s modules=%s",
             report.get("total_sam_params"),
             report.get("trainable_sam_params"),
             report.get("trainable_sam_ratio", 0.0),
             report.get("lora_param_count"),
             report.get("adapter_param_count"),
             report.get("mask_decoder_trainable"),
+            report.get("prompt_generator_trainable"),
             report.get("trainable_prompt_generator_params"),
             report.get("trainable_sam_modules"),
         )
@@ -319,7 +322,7 @@ class SAGESAMR4Trainer:
                         sam_u.get("sam_embedding"),
                         gate=targets["structure_gate"],
                         boundary=sam_u.get("sam_boundary"),
-                        topk=structure_cfg.get("online_topk", self.config.get("sam", {}).get("topk_edges", 8)),
+                        topk=structure_cfg.get("online_topk", 8),
                         resolution=structure_cfg.get("relation_resolution", 16),
                         temperature=structure_cfg.get("relation_temperature", 0.2),
                         rank_weight=structure_cfg.get("relation_rank_weight", 0.25),
@@ -406,7 +409,8 @@ class SAGESAMR4Trainer:
                 "iteration": iteration,
                 "teacher_q": self.calibrator.teacher_q.tolist(),
                 "sam_q": self.calibrator.sam_q.tolist(),
-                "prompt_q": self.calibrator.prompt_q.tolist(),
+                "sam_iou_q": self.calibrator.sam_iou_q.tolist(),
+                "prompt_stability_q": self.calibrator.prompt_stability_q.tolist(),
             },
         )
 

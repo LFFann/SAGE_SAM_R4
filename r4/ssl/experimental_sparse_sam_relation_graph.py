@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 
 def build_topk_relation_graph(embedding: torch.Tensor, topk: int = 8):
+    """Experimental offline relation graph helper kept out of the R4 main loop."""
     if embedding.ndim != 4:
         raise ValueError("embedding must be BCHW")
     feat = F.normalize(embedding.flatten(2).mean(0).transpose(0, 1), dim=-1)
@@ -17,4 +18,3 @@ def build_topk_relation_graph(embedding: torch.Tensor, topk: int = 8):
     vals = vals[:, 1:]
     src = torch.arange(n, device=embedding.device).view(-1, 1).expand_as(idx).reshape(-1)
     return {"edge_index": torch.stack([src.cpu(), idx.reshape(-1).cpu()]), "edge_weight": vals.reshape(-1).cpu()}
-

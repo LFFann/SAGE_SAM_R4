@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from r4.models.real_sam_wrapper import RealSAMWrapper
-from r4.models.sam_peft import LoRALinear, SAMPEFTAdapter
+from r4.models.sam_peft import BlockWithAdapter, LoRALinear, SAMPEFTAdapter
 
 
 class TinyBlock(nn.Module):
@@ -42,6 +42,24 @@ def test_lora_injection_targets_last_blocks_only():
     assert adapter.report.lora_param_count > 0
 
 
+def test_adapter_injection_targets_last_blocks_only():
+    sam = TinySAM()
+    adapter = SAMPEFTAdapter(
+        sam,
+        train_peft=True,
+        peft_type="adapter",
+        train_mask_decoder=False,
+        train_last_n_blocks=1,
+        adapter_dim=3,
+        max_trainable_ratio=1.0,
+        hard_max_trainable_ratio=1.0,
+    )
+    assert not isinstance(sam.image_encoder.blocks[0], BlockWithAdapter)
+    assert isinstance(sam.image_encoder.blocks[1], BlockWithAdapter)
+    assert adapter.report.adapter_param_count > 0
+    assert adapter.report.lora_param_count == 0
+
+
 class FakePELayer(nn.Module):
     def forward_with_coords(self, coords, image_size):
         out = torch.zeros(*coords.shape[:-1], 256, device=coords.device)
@@ -59,6 +77,7 @@ class FakePromptEncoder(nn.Module):
 
 def test_local_prompt_preparation_uses_points_negative_points_and_boxes():
     wrapper = RealSAMWrapper.__new__(RealSAMWrapper)
+    nn.Module.__init__(wrapper)
     wrapper.device = torch.device("cpu")
     wrapper.image_size = 1024
     wrapper.sam_source = "SAGE_SAM_R4/Model/sam:test"

@@ -55,6 +55,8 @@ class RealSAMWrapper(nn.Module):
         train_last_n_blocks: int = 0,
         lora_rank: int = 4,
         lora_alpha: float = 8.0,
+        adapter_dim: int = 32,
+        adapter_scale: float = 1.0,
         max_trainable_ratio: float = 0.05,
         use_mask_prompt: bool = True,
         use_box_prompt: bool = True,
@@ -89,6 +91,8 @@ class RealSAMWrapper(nn.Module):
             train_last_n_blocks=train_last_n_blocks,
             lora_rank=lora_rank,
             lora_alpha=lora_alpha,
+            adapter_dim=adapter_dim,
+            adapter_scale=adapter_scale,
             max_trainable_ratio=max_trainable_ratio,
         )
         if self.peft_adapter.report.trainable_sam_params > 0:

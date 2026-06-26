@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from r4.data.dataset_2d import SegmentationDataset2D, resolve_dataset_root
 from r4.models.real_sam_wrapper import RealSAMWrapper
-from r4.ssl.sparse_sam_relation_graph import build_topk_relation_graph
+from r4.ssl.experimental_sparse_sam_relation_graph import build_topk_relation_graph
 from r4.utils.io import load_yaml
 
 

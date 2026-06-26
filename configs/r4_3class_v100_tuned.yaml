@@ -64,7 +64,7 @@ sam:
   train_peft: true
   peft_type: lora_adapter
   train_last_n_blocks: 4
-  max_trainable_ratio: 0.05
+  max_trainable_ratio: 0.08
   lora_rank: 4
   lora_alpha: 8
   adapter_dim: 32

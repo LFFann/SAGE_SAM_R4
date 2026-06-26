@@ -107,7 +107,7 @@ pseudo:
   min_sam_confidence: 0.5
 
 structure:
-  use_online_relation: false
+  use_online_relation: true
   online_topk: 4
   relation_resolution: 8
   relation_temperature: 0.2
