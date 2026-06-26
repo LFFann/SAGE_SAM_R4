@@ -112,6 +112,7 @@ calibration:
   momentum: 0.8
   classwise: true
   use_soft_gate: true
+  use_calibration_split: true
   min_participation_ratio: 0.20
   max_quantile_clip: 0.97
   temperature: 0.05

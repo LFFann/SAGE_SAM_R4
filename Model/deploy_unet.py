@@ -47,7 +47,7 @@ class UpBlock(nn.Module):
 
 
 class DeployUNet(nn.Module):
-    """KnowSAM-style five-level UNet used as the only deployable R4 network."""
+    """UNet-like texture branch used inside DeployDualFusionSegmentor."""
 
     def __init__(
         self,
@@ -107,4 +107,3 @@ class DeployUNet(nn.Module):
         if self.boundary_head is not None:
             out["boundary_logits"] = self.boundary_head(decoder_features[-1])
         return out
-

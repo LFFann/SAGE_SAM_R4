@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from contextlib import nullcontext
+from itertools import cycle
 from pathlib import Path
 
 import torch
@@ -155,9 +156,12 @@ class SAGESAMR4Trainer:
             ).to(self.device)
 
         cal_cfg = config.get("calibration", config.get("conformal", {}))
+        calibrator_start_iter = cal_cfg.get("start_iter", cal_cfg.get("calibrator_start_iter", 500))
+        if cal_cfg.get("update_only_after_warmup", False):
+            calibrator_start_iter = max(int(calibrator_start_iter), int(train_cfg.get("warmup_iterations", 0)))
         self.calibrator = PromptReliabilityCalibrator(
             self.num_classes,
-            start_iter=cal_cfg.get("start_iter", cal_cfg.get("calibrator_start_iter", 500)),
+            start_iter=calibrator_start_iter,
             update_every=cal_cfg.get("update_every", 250),
             momentum=cal_cfg.get("momentum", 0.8),
             min_pixels_per_class=cal_cfg.get("min_pixels_per_class", 128),
@@ -179,6 +183,7 @@ class SAGESAMR4Trainer:
         self.grad_accum_steps = max(1, int(train_cfg.get("gradient_accumulation", 1)))
         self.best_metrics = {"avg_dice": -1.0, "avg_hd95": float("inf")}
         self.start_iteration = 0
+        self.calibration_iter = None
         self._log_trainability()
         self._build_data()
 
@@ -262,6 +267,7 @@ class SAGESAMR4Trainer:
         )
         self.val_loader = DataLoader(self.val_ds, batch_size=self.config.get("eval", {}).get("batch_size", 1), shuffle=False, num_workers=0)
         self.calibration_loader = DataLoader(self.calibration_ds, batch_size=self.config.get("eval", {}).get("batch_size", 1), shuffle=False, num_workers=0)
+        self.calibration_iter = cycle(self.calibration_loader)
 
     def fit_calibrator(self):
         self.logger.info("Prompt reliability calibration is online; skipping random pre-training fit")
@@ -460,6 +466,8 @@ class SAGESAMR4Trainer:
 
             if self.use_sam and sam_u.get("valid"):
                 sam_gate_weight = targets["sam_weight"] * targets["teacher_reliable_mask"].float()
+                sam_utility_value = float((sam_u["sam_prob"].detach() * targets["teacher_only_soft_target"]).sum(dim=1).mean())
+                self.sam_utility.update(sam_utility_value)
                 loss_kd = sam_student_kd_loss(
                     out_s1["logits"],
                     sam_u["sam_prob"],
@@ -522,7 +530,7 @@ class SAGESAMR4Trainer:
                 if iteration % int(self.config["teacher"].get("slow_refresh_every", 500)) == 0:
                     self.dual_teacher.refresh_slow(self.student)
                     append_jsonl(self.output_dir / "diagnostics.jsonl", {"event": "slow_teacher_refresh", "iteration": iteration})
-                self._maybe_update_prompt_calibrator(iteration, out_l, y_l, sam_l)
+                self._maybe_update_prompt_calibrator(iteration, fallback_out=out_l, fallback_y=y_l, fallback_sam=sam_l)
 
         prompt_quality = 0.0
         if sam_u.get("valid") and sam_u.get("prompt_quality") is not None:
@@ -550,6 +558,8 @@ class SAGESAMR4Trainer:
             "unsup_weight": ramp,
             "sam_self_reliance_scale": sam_scale,
             "sam_semantic_weight": self.sam_utility.semantic_weight(iteration),
+            "sam_utility_ema": float(self.sam_utility.utility_ema),
+            "sam_utility_disabled": 1.0 if self.sam_utility.disabled else 0.0,
             "fast_slow_agreement": float(teacher_out["agreement"].detach()),
             "sam_valid_ratio": 1.0 if sam_u.get("valid") else 0.0,
             "prompt_quality": prompt_quality,
@@ -605,7 +615,9 @@ class SAGESAMR4Trainer:
 
     def _sam_self_reliance_scale(self, iteration: int):
         sam_cfg = self.config.get("sam", {})
-        start = int(sam_cfg.get("self_reliance_start", self.config["train"].get("max_iterations", 10**9) + 1))
+        max_iter = int(self.config["train"].get("max_iterations", 10**9))
+        default_start = int(0.7 * max_iter)
+        start = int(sam_cfg.get("self_reliance_start", default_start))
         if iteration <= start:
             return 1.0
         decay = float(sam_cfg.get("self_reliance_decay", 1.0))
@@ -613,22 +625,56 @@ class SAGESAMR4Trainer:
         return max(floor, decay ** max(0, iteration - start))
 
     @torch.no_grad()
-    def _maybe_update_prompt_calibrator(self, iteration: int, out_l: dict, y_l: torch.Tensor, sam_l: dict):
-        if not (self.use_sam and sam_l.get("valid") and self.calibrator.should_update(iteration)):
+    def _maybe_update_prompt_calibrator(
+        self,
+        iteration: int,
+        fallback_out: dict | None = None,
+        fallback_y: torch.Tensor | None = None,
+        fallback_sam: dict | None = None,
+    ):
+        if not (self.use_sam and self.mentor is not None and self.calibrator.should_update(iteration)):
             return
-        student_prob_l = torch.softmax(out_l["logits"].detach(), dim=1)
+        cal_cfg = self.config.get("calibration", {})
+        event_name = "prompt_reliability_update"
+        if self.calibration_iter is not None and cal_cfg.get("use_calibration_split", True):
+            batch_c = next(self.calibration_iter)
+            x_c = batch_c["image"].to(self.device)
+            y_c = batch_c["mask"].to(self.device)
+            student_was_training = getattr(self.student, "training", None)
+            mentor_was_training = getattr(self.mentor, "training", None)
+            if hasattr(self.student, "eval"):
+                self.student.eval()
+            if hasattr(self.mentor, "eval"):
+                self.mentor.eval()
+            try:
+                out_c = self.student(x_c, return_features=True)
+                sam_c = self.mentor.forward_labeled(x_c, y_c)
+            finally:
+                if student_was_training and hasattr(self.student, "train"):
+                    self.student.train()
+                if mentor_was_training and hasattr(self.mentor, "train"):
+                    self.mentor.train()
+            event_name = "prompt_reliability_update_calibration_split"
+        else:
+            out_c = fallback_out
+            y_c = fallback_y
+            sam_c = fallback_sam or {}
+        if out_c is None or y_c is None or not sam_c.get("valid"):
+            return
+        student_prob_l = torch.softmax(out_c["logits"].detach(), dim=1)
         self.calibrator.update_from_batch(
             teacher_prob=student_prob_l,
-            sam_prob=sam_l["sam_prob"].detach(),
-            sam_iou=sam_l.get("sam_iou"),
-            prompt_quality=sam_l.get("prompt_quality"),
-            gt=y_l.detach(),
+            sam_prob=sam_c["sam_prob"].detach(),
+            sam_iou=sam_c.get("sam_iou"),
+            prompt_quality=sam_c.get("prompt_quality"),
+            gt=y_c.detach(),
         )
         append_jsonl(
             self.output_dir / "diagnostics.jsonl",
             {
-                "event": "prompt_reliability_update",
+                "event": event_name,
                 "iteration": iteration,
+                "calibration_batch_size": int(y_c.shape[0]),
                 "teacher_q": self.calibrator.teacher_q.tolist(),
                 "sam_q": self.calibrator.sam_q.tolist(),
                 "sam_iou_q": self.calibrator.sam_iou_q.tolist(),

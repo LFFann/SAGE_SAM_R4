@@ -83,19 +83,25 @@ def build_set_valued_targets(teacher_out: dict, sam_out: dict | None, calibrator
     candidate_weight = torch.maximum(semantic_weight, teacher_weight).clamp(0.05, 1.0)
     safe_negative_weight = torch.maximum(1.0 - candidate_weight, negative_mask.float()).clamp(0.0, 1.0)
     per_class_participation = []
+    per_class_safe_negative = []
     for c in range(teacher_prob.shape[1]):
         cls_mask = argmax == c
         if cls_mask.any():
             per_class_participation.append(float((sam_train_weight[cls_mask] > 0.05).float().mean().detach()))
         else:
             per_class_participation.append(0.0)
+        per_class_safe_negative.append(float(negative_set[:, c].float().mean().detach()))
     sam_weight_flat = sam_train_weight.detach().reshape(-1)
     quantiles = torch.quantile(sam_weight_flat.float().cpu(), torch.tensor([0.25, 0.50, 0.75])) if sam_weight_flat.numel() else torch.zeros(3)
     stats = {
         "singleton_ratio": float(singleton_mask.float().mean().detach()),
+        "singleton_pixel_ratio": float(singleton_mask.float().mean().detach()),
         "ambiguous_ratio": float(ambiguous_mask.float().mean().detach()),
+        "ambiguous_pixel_ratio": float(ambiguous_mask.float().mean().detach()),
         "conflict_ratio": float(conflict_mask.float().mean().detach()),
         "negative_ratio": float(negative_mask.float().mean().detach()),
+        "safe_negative_pixel_ratio": float(negative_mask.float().mean().detach()),
+        "per_class_safe_negative_ratio": per_class_safe_negative,
         "avg_set_size": float(candidate_set.float().sum(dim=1).mean().detach()),
         "sam_semantic_gate_ratio": float(semantic_gate.float().mean().detach()),
         "sam_structure_gate_ratio": float(structure_gate.float().mean().detach()),

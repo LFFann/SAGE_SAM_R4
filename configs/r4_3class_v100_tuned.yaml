@@ -72,7 +72,7 @@ sam:
   train_mask_decoder: true
   train_prompt_generator: true
   freeze_prompt_encoder: true
-  self_reliance_start: 6000
+  self_reliance_start: 4200
   self_reliance_decay: 0.999
   self_reliance_min_weight: 0.05
   keep_labeled_sam_sup: true
@@ -104,6 +104,7 @@ calibration:
   momentum: 0.8
   classwise: true
   use_soft_gate: true
+  use_calibration_split: true
   min_participation_ratio: 0.20
   max_quantile_clip: 0.97
   temperature: 0.05

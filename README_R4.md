@@ -12,7 +12,7 @@ DeployDualFusionSegmentor student
 + trainable prompt generator
 + trainable SAM mask decoder
 + EMA weak-to-strong student learning
-+ calibrated soft SAM participation with minimum coverage protection
++ conformal-inspired soft SAM participation with calibration-split updates
 + singleton, set-valued, fuzzy-positive, safe-negative, and correlation-propagated supervision
 + online SAM-student boundary/relation consistency without disk cache
 + late self-reliance decay for SAM unsupervised/KD losses
@@ -29,7 +29,7 @@ The final deploy path is `DeployDualFusionSegmentor`, and validation/testing eva
 - `r4/models/prompt_generator.py`: trainable one-vs-rest mask-prompt generator.
 - `r4/models/promptable_sam_mentor.py`: online SAM co-learner used during training.
 - `r4/models/sam_peft.py`: SAM freezing plus real LoRA and BottleneckAdapter injection for selected image-encoder blocks.
-- `r4/calibration/prompt_reliability_calibrator.py`: online prompt-aware thresholds plus soft participation weights.
+- `r4/calibration/prompt_reliability_calibrator.py`: calibration-split prompt-aware thresholds plus soft participation weights.
 - `r4/data/`: dataset, paired semi-supervised iterator, split, and augmentation transforms.
 - `r4/ssl/target_builder.py`: SAM-teacher singleton, ambiguous, conflict, and safe-negative targets.
 - `r4/ssl/online_sam_relation.py`: batch-local top-k KL/rank SAM-student relation loss without cache.
@@ -116,7 +116,7 @@ R4 does not use multi-round training, offline pseudo-label generation, or struct
 6. spatially aligned strong dual-fusion student prediction with complementary dropout
 7. set-valued, fuzzy-positive, safe-negative, conflict-review, correlation, KD, soft-gated SAM unsupervised, boundary, and online relation losses
 8. one optimizer step for student + SAM PEFT + prompt generator + mask decoder
-9. EMA teacher update and periodic prompt reliability calibration
+9. EMA teacher update and periodic prompt reliability calibration on the held-out labeled calibration split
 ```
 
 ## SAM Checkpoint
@@ -132,6 +132,7 @@ For CPU smoke, `sam.use_sam=false`; this covers train/val/test/export without ne
 - `sam_prob` is assembled from SAM foreground masks and a background channel, not from `teacher_prob.clone()`.
 - Training logs include `loss_sam_sup`, `loss_sam_unsup`, `loss_sam_kd`, `prompt_quality`, `sam_teacher_agreement`, and `sam_adapter_grad_norm`.
 - Training logs include `sam_soft_weight_mean`, `sam_participation_ratio`, `per_class_sam_participation_ratio`, `loss_conflict_review`, and `loss_correlation`.
+- Calibration is conformal-inspired class-wise soft reliability calibration. It uses the held-out calibration split for threshold updates, but it should not be described as a strict conformal prediction guarantee unless a formal non-conformity/coverage proof is added.
 - Diagnostics include `total_sam_params`, `trainable_sam_params`, `trainable_sam_ratio`, `lora_param_count`, `adapter_param_count`, `mask_decoder_trainable`, `prompt_generator_trainable`, and trainable module names.
 - `loss_sam_unsup` uses teacher-only reliable targets, while student SSL may use the fused SAM-teacher target.
 - Changing the prompt changes the SAM mask decoder input and therefore the SAM output.
